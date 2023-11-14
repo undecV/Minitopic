@@ -1,0 +1,9 @@
+#!python -m pip install -r
+click
+miniflux
+rich
+# textual
+# textual-dev
+# tqdm
+jieba
+requests
