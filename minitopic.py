@@ -5,6 +5,7 @@ from typing import Any
 import logging
 import re
 from pathlib import Path
+from copy import deepcopy
 
 from rich import box
 from rich.style import Style
@@ -22,7 +23,7 @@ console = Console(highlight=False)
 print = console.print  # pylint: disable=w0622
 
 logging.basicConfig(level=logging.DEBUG, format="%(message)s", handlers=[RichHandler(), ])
-log = logging.getLogger(__name__)
+log = logging.getLogger()
 
 
 # Configurations
@@ -36,12 +37,12 @@ def add_to_user_dict(keyword: str, user_dict_path: Path):
     log.info("Appending keyword \"%s\" to user dict.", keyword)
     if not user_dict_path.exists():
         user_dict_path.parent.mkdir(parents=True, exist_ok=True)
-    lines = user_dict_path.read_text().split('\n')
+    lines = user_dict_path.read_text(encoding="UTF-8").split('\n')
     keywords = [line.split(" ")[0] for line in lines]
     if keyword in keywords:
         log.info("The keyword is already in the dictionary.")
         return
-    with user_dict_path.open("a+") as fp:
+    with user_dict_path.open("a+", encoding="UTF-8") as fp:
         fp.write(keyword + "\n")
         log.info("The keyword is written in the dictionary.")
 
@@ -83,7 +84,7 @@ def color_datetime(date: datetime, strftime: str = "%Y-%m-%d %H:%M:%S"):
     return date.strftime(strftime)
 
 
-def fetch_entries(client: miniflux.Client, fetch_batch_size: int = 100) -> list[Any]:
+def fetch_entries(client: miniflux.Client, status: str = "unread", fetch_batch_size: int = 100) -> list[Any]:
     """
     Fetch a list of entries from a client with pagination support.
 
@@ -108,7 +109,7 @@ def fetch_entries(client: miniflux.Client, fetch_batch_size: int = 100) -> list[
         task = progress.add_task("Fetching entries...", total=0, start=False)
         while True:
             response = client.get_entries(
-                order="published_at", direction="asc", status="unread",
+                order="published_at", direction="asc", status=status,
                 offset=fetch_count, limit=fetch_batch_size
             )
             fetch_total = response["total"]
@@ -158,24 +159,29 @@ def cli(keyword: str, fetch_batch_size: int, dryrun: bool, force_fetch: bool):
 
     if (not entries) or force_fetch:
         log.debug("Fetch start.")
-        entries = fetch_entries(client, fetch_batch_size)
+        entries = fetch_entries(client, "unread", fetch_batch_size)
         log.info("%s entries fetched.", len(entries))
         cache = SimpleCache(cache_path, cache_life)
         cache.write(entries)
         log.info("Cache saved: \"%s\".", cache_path)
 
     results = []
+    formated_results = []
 
     for entry in track(entries, description="Seatching"):
 
         if match := re.search(keyword, entry["title"], re.IGNORECASE):
+            if entry["status"] in ("read", "removed", ):
+                continue
+            results.append(entry)
+            entry = deepcopy(entry)
             start, end = match.start(), match.end()
             # end = start + len(keyword)
             title = entry["title"]
             entry["title"] = f"[link={entry['url']}]{title[:start]}[red]{title[start:end]}[/red]{title[end:]}[/link]"
             entry["published_at"] = color_datetime(datetime.fromisoformat(entry["published_at"]))
             entry["feed"]["title"] = f"[link={entry['feed']['feed_url']}]{entry['feed']['title']}[/link]"
-            results.append(entry)
+            formated_results.append(entry)
 
     if len(results) <= 0:
         print("[b green]No result found.[/b green]")
@@ -191,7 +197,7 @@ def cli(keyword: str, fetch_batch_size: int, dryrun: bool, force_fetch: bool):
     table.add_column("Feed", justify="left", no_wrap=True)
     table.add_column("Date", justify="right", no_wrap=True)
 
-    for result in results:
+    for result in formated_results:
         table.add_row(str(result["id"]), result["title"], result["feed"]["title"], result["published_at"], )
 
     print(table)
@@ -205,9 +211,16 @@ def cli(keyword: str, fetch_batch_size: int, dryrun: bool, force_fetch: bool):
     if dryrun:
         print(f"Dryrun: mark {len(ids)} entries {ids} as read.")
     else:
+        cache = SimpleCache(cache_path, cache_life)
+        for result in results:
+            result["status"] = "read"
+        cache.write(entries)
+        log.info("Mark as entry %d as read in the cache.", result["id"])
+
         if user_dict_path:
             add_to_user_dict(keyword, user_dict_path)
         print(f"Marking {len(ids)} entries {ids} as read.")
+
         client.update_entries(entry_ids=ids, status="read")
     print("Done.")
 

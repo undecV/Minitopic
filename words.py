@@ -36,7 +36,11 @@ if __name__ == "__main__":
     cache_path = Path(__file__).parent / "cache.pkl"
     cache = pickle.load(cache_path.open('rb'))
     entries = cache["data"]
-    titles = [entry["title"] for entry in entries]
+    titles = []
+    for entry in entries:
+        if entry["status"] in ("read", "removed", ):
+            continue
+        titles.append(entry["title"])
 
-    tags = jieba.analyse.extract_tags(" ".join(titles), 50)
+    tags = jieba.analyse.extract_tags(" ".join(titles), 50, True)
     print(tags)
