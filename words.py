@@ -42,5 +42,5 @@ if __name__ == "__main__":
             continue
         titles.append(entry["title"])
 
-    tags = jieba.analyse.extract_tags(" ".join(titles), 50, True)
+    tags = jieba.analyse.extract_tags(" ".join(titles), 50)
     print(tags)

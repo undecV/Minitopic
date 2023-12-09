@@ -1,87 +1,127 @@
-"""Search and mark as read for Miniflux."""
+"""Advenced keyword search."""
 
-from datetime import datetime, timedelta, timezone
-from typing import Any
-import logging
 import re
+import logging
+from typing import Any
 from pathlib import Path
-from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 
-from rich import box
-from rich.style import Style
-from rich.console import Console
-from rich.logging import RichHandler
-from rich.progress import Progress, track
-from rich.table import Table
-import click
 import miniflux
+import humanize
+import click
+from rich.theme import Theme
+from rich.table import Table
+from rich.style import Style
+from rich.progress import Progress
+from rich.logging import RichHandler
+from rich.console import Console
+from rich import box
 
 from simple_cache import SimpleCache
-from config import base_url, api_key
+from config import BASE_URL, API_KEY, CACHE_PATH, CACHE_LIFE, USER_DICT_PATH
 
-console = Console(highlight=False)
+theme = Theme({
+    "keyword_and": "bold red",
+    "keyword_or": "bold yellow",
+})
+console = Console(highlight=False, theme=theme)
 print = console.print  # pylint: disable=w0622
 
-logging.basicConfig(level=logging.DEBUG, format="%(message)s", handlers=[RichHandler(), ])
+logging.basicConfig(format="%(message)s", handlers=[RichHandler(), ])
 log = logging.getLogger()
+log.setLevel(logging.DEBUG)
 
 
-# Configurations
+def and_or_not_match(
+    string: str, patterns_and: list[str] = None, patterns_or: list[str] = None, patterns_not: list[str] = None
+) -> tuple[bool, list[re.Match | None], list[re.Match | None], list[re.Match | None]]:
+    """
+    Perform a search on the input string using a combination of AND, OR, and NOT patterns.
 
-cache_life = timedelta(days=1)
-cache_path = Path(__file__).parent / "cache.pkl"
-user_dict_path = Path("./dict/user_dict.txt")
+    Args:
+    - string (str): The input string to be searched.
+    - patterns_and (list[str], optional): List of patterns for the AND condition.
+      All patterns in this list must match in the input string for a positive result.
+    - patterns_or (list[str], optional): List of patterns for the OR condition.
+      At least one pattern in this list must match in the input string for a positive result.
+    - patterns_not (list[str], optional): List of patterns for the NOT condition.
+      None of the patterns in this list should match in the input string for a positive result.
 
+    Returns:
+    - tuple[bool, list[re.Match | None], list[re.Match | None], list[re.Match | None]]:
+      A tuple containing:
+      - bool: True if the input string satisfies all specified conditions, False otherwise.
+      - list[re.Match | None]: Matches for patterns in the AND condition.
+      - list[re.Match | None]: Matches for patterns in the OR condition.
+      - list[re.Match | None]: Matches for patterns in the NOT condition.
 
-def add_to_user_dict(keyword: str, user_dict_path: Path):
-    log.info("Appending keyword \"%s\" to user dict.", keyword)
-    if not user_dict_path.exists():
-        user_dict_path.parent.mkdir(parents=True, exist_ok=True)
-    lines = user_dict_path.read_text(encoding="UTF-8").split('\n')
-    keywords = [line.split(" ")[0] for line in lines]
-    if keyword in keywords:
-        log.info("The keyword is already in the dictionary.")
-        return
-    with user_dict_path.open("a+", encoding="UTF-8") as fp:
-        fp.write(keyword + "\n")
-        log.info("The keyword is written in the dictionary.")
+    Note:
+    - Patterns are case-insensitive.
+    - If a list for any condition is empty, that condition is considered satisfied.
+    """
+    patterns_and = patterns_and or []
+    patterns_or = patterns_or or []
+    patterns_not = patterns_not or []
 
+    matches_and = [re.search(keyword, string, re.IGNORECASE) for keyword in patterns_and]
+    matches_or = [re.search(keyword, string, re.IGNORECASE) for keyword in patterns_or]
+    matches_not = [re.search(keyword, string, re.IGNORECASE) for keyword in patterns_not]
 
-client = miniflux.Client(base_url=base_url, api_key=api_key)
+    is_match_and: bool = bool(len(matches_and) == 0 or all(matches_and))
+    is_match_or: bool = bool(len(matches_or) == 0 or any(matches_or))
+    is_match_not: bool = bool(len(matches_not) == 0 or not any(matches_not))
+
+    is_match: bool = bool(is_match_and and is_match_or and is_match_not)
+
+    return is_match, matches_and, matches_or, matches_not
 
 
 def color_datetime(date: datetime, strftime: str = "%Y-%m-%d %H:%M:%S"):
     """
-    Formats a datetime object with color-coded text based on its age relative to the current datetime.
+    Format a datetime object with optional coloring based on its recency.
 
     Args:
-        date (datetime): The datetime object to be formatted.
-        strftime (str, optional): A string representing the desired datetime format
-                                  (default is "%Y-%m-%d %H:%M:%S").
+    - date (datetime): The datetime object to be formatted.
+    - strftime (str, optional): A string specifying the format of the output.
+      If set to "humanize" or "natural", a humanized representation of the
+      time difference (e.g., '2 days ago') will be used. Otherwise, a custom
+      strftime format can be provided. Default is "%Y-%m-%d %H:%M:%S".
 
     Returns:
-        str: A formatted string that includes color-coding based on the age of the datetime:
-             - If the datetime is within the last 7 days, it will be colored green.
-             - If the datetime is between 7 and 14 days ago, it will be colored yellow.
-             - If the datetime is older than 14 days, it will be colored red.
-
-    Example:
-        >>> from datetime import datetime
-        >>> color_datetime(datetime(2023, 9, 20), "%Y-%m-%d")
-        '[green]2023-09-20[/green]'
+    - str: A formatted string representing the input datetime with optional coloring.
 
     Note:
-        This function uses the 'datetime' module to calculate the age of the input datetime
-        relative to the current datetime in UTC.
+    - The coloring is based on the recency of the datetime compared to the current time.
+      The more recent the datetime, the greener the color; the older, the redder.
+
+    Example:
+    ```python
+    >>> from datetime import datetime, timedelta
+    >>> now = datetime.now()
+    >>> recent_date = now - timedelta(days=2)
+    >>> old_date = now - timedelta(days=14)
+    >>> print(color_datetime(recent_date))  # Output will be in green
+    >>> print(color_datetime(old_date))  # Output will be in red
+    >>> print(color_datetime(now, strftime="humanize"))  # Output will be a humanized time difference
+    ```
+
+    Dependencies:
+    - The function relies on the 'humanize' library for humanized time representations.
+      Make sure to install it using: `pip install humanize`
     """
+    time_str = ""
+    if strftime.lower() in ("humanize", "natural", ):
+        time_str = humanize.naturaltime(date)
+    else:
+        time_str = date.strftime(strftime)
     now = datetime.now(timezone.utc)
     colors = ["red", "yellow", "green"]
     delta: timedelta = now - date
     for i, color in enumerate(colors):
         days = (len(colors) - i - 1) * 7
         if delta.days >= days:
-            return f"[{color}]{date.strftime(strftime)}[/{color}]"
-    return date.strftime(strftime)
+            return f"[{color}]{time_str}[/{color}]"
+    return time_str
 
 
 def fetch_entries(client: miniflux.Client, status: str = "unread", fetch_batch_size: int = 100) -> list[Any]:
@@ -117,110 +157,196 @@ def fetch_entries(client: miniflux.Client, status: str = "unread", fetch_batch_s
             fetch_count += len(fetched)
             entries.extend(fetched)
             progress.start_task(task)
-            progress.update(task, total=fetch_total, completed=fetch_count)
+            progress.update(task, total=fetch_total, completed=fetch_count,
+                            description=f"{fetch_count} / {fetch_total}")
             if fetch_count >= fetch_total:
                 break
     return entries
 
 
-CONTEXT_SETTINGS = {"help_option_names": ["--help", "-h"]}
+class SimpleSetInFile:
+    """A simple set implementation using a text file as storage."""
+    path: Path
+    lines: list[str]
+
+    def __init__(self, path: Path) -> None:
+        """
+        Initializes the SimpleSetInFile object with the given file path.
+        Reads the contents of the file and populates the set.
+
+        Parameters:
+            path (Path): The file path where the set is stored.
+        """
+        self.path = path
+        self.read()
+
+    def read(self, encoding="UTF-8") -> None:
+        """
+        Reads the contents of the file and updates the set.
+
+        Parameters:
+            encoding (str, optional): The encoding of the file. Defaults to "UTF-8".
+        """
+        text = self.path.read_text(encoding=encoding).strip()
+        self.lines = [line.strip() for line in text.splitlines()]
+
+    def append(self, line) -> None:
+        """
+        Appends a new element to the set if it is not already present.
+        Writes the updated set to the file.
+
+        Parameters:
+            line: The element to be appended to the set.
+        """
+        if line in self.lines:
+            return
+        self.lines.append(line)
+        self.write()
+
+    def write(self, encoding="UTF-8") -> None:
+        """
+        Writes the current set elements to the file.
+
+        Parameters:
+            encoding (str, optional): The encoding of the file. Defaults to "UTF-8".
+        """
+        self.path.write_text("\n".join(self.lines), encoding=encoding)
 
 
-@click.command(context_settings=CONTEXT_SETTINGS)
-@click.argument("keyword")
-@click.option(
-    "-b", "--batch-size", "fetch_batch_size",
-    type=click.IntRange(min=100), default=1000, show_default=True,
-    help="The number of entries retrieved each time."
-)
-@click.option(
-    "-d", "--dryrun", "dryrun",
-    is_flag=True, default=False, show_default=True, help="Dryrun."
-)
-@click.option(
-    "-f", "--force-fetch", "force_fetch",
-    is_flag=True, default=False, show_default=True, help="Force fetching from the API regardless of cache expiration."
-)
-def cli(keyword: str, fetch_batch_size: int, dryrun: bool, force_fetch: bool):
+@click.command(context_settings={"help_option_names": ["-h", "--help"]})
+@click.argument("keywords", nargs=-1)
+@click.option("-a", "--and", "keywords_and", multiple=True, metavar="AND_KEYWORDS",
+              help="Specify keywords for 'AND' search. Results must contain all these keywords.")
+@click.option("-r", "--or", "keywords_or", multiple=True, metavar="OR_KEYWORDS",
+              help="Specify keywords for 'OR' search. Results can contain any of these keywords.")
+@click.option("-n", "--not", "keywords_not", multiple=True, metavar="NOT_KEYWORDS",
+              help="Specify keywords for 'NOT' search. Results must not contain any of these keywords.")
+@click.option("-f", "--force-fetch", "force_fetch", is_flag=True, default=False, show_default=True,
+              metavar="FORCE_FETCH", help="Force fetching from the API regardless of cache expiration.")
+@click.option("-b", "--batch-size", "fetch_batch_size", type=click.IntRange(min=100), default=1000, show_default=True,
+              metavar="FETCH_BATCH_SIZE", help="The number of entries retrieved each time.")
+@click.option("-d", "--dryrun", "dryrun", is_flag=True, default=False, show_default=True,
+              metavar="DRYRUN", help="Dryrun.")
+def cli(keywords: str, keywords_and: list[str], keywords_or: list[str], keywords_not: list[str],
+        force_fetch: bool, fetch_batch_size: int, dryrun: bool) -> None:
     """Search and mark as read for Miniflux."""
-    log.info("keyword: %s", keyword)
-    log.info("fetch_batch_size: %d", fetch_batch_size)
-    log.info("dryrun: %r", dryrun)
-    log.info("force_fetch: %r", force_fetch)
+    keywords_and = keywords + keywords_and
+
+    log.debug("%20s: %r", "keywords", keywords)
+    log.debug("%20s: %r", "keywords_and", keywords_and)
+    log.debug("%20s: %r", "keywords_or", keywords_or)
+    log.debug("%20s: %r", "keywords_not", keywords_not)
+    log.debug("%20s: %d", "fetch_batch_size", fetch_batch_size)
+    log.debug("%20s: %r", "dryrun", dryrun)
+    log.debug("%20s: %r", "force_fetch", force_fetch)
 
     entries: Any | None = None
+    client = miniflux.Client(base_url=BASE_URL, api_key=API_KEY)
+
+    # Fetch and cacheing.
     try:
-        cache = SimpleCache(cache_path, cache_life)
+        cache = SimpleCache(CACHE_PATH, CACHE_LIFE)
         assert isinstance(cache.payload, list), "Bad cache format (data, Type)."
         assert not cache.is_expired(), f"Cache file is expired: {cache.cached_time.isoformat()}."
         entries = cache.payload
-    except Exception as exception:
+    except Exception as exception:  # pylint: disable=w0718
         log.warning("Fail to load from cache: %r.", exception)
 
     if (not entries) or force_fetch:
         log.debug("Fetch start.")
         entries = fetch_entries(client, "unread", fetch_batch_size)
         log.info("%s entries fetched.", len(entries))
-        cache = SimpleCache(cache_path, cache_life)
+        cache = SimpleCache(CACHE_PATH, CACHE_LIFE)
         cache.write(entries)
-        log.info("Cache saved: \"%s\".", cache_path)
+        log.info("Cache saved: \"%s\".", CACHE_PATH)
 
+    # Search
     results = []
-    formated_results = []
-
-    for entry in track(entries, description="Seatching"):
-
-        if match := re.search(keyword, entry["title"], re.IGNORECASE):
-            if entry["status"] in ("read", "removed", ):
-                continue
-            results.append(entry)
-            entry = deepcopy(entry)
-            start, end = match.start(), match.end()
-            # end = start + len(keyword)
-            title = entry["title"]
-            entry["title"] = f"[link={entry['url']}]{title[:start]}[red]{title[start:end]}[/red]{title[end:]}[/link]"
-            entry["published_at"] = color_datetime(datetime.fromisoformat(entry["published_at"]))
-            entry["feed"]["title"] = f"[link={entry['feed']['feed_url']}]{entry['feed']['title']}[/link]"
-            formated_results.append(entry)
-
-    if len(results) <= 0:
-        print("[b green]No result found.[/b green]")
-        return 0
-
-    table = Table(
-        title=f"Keyword \"[b][red]{keyword}[/red][/b]\" has {len(results)} result.",
-        box=box.HORIZONTALS,
-        row_styles=[Style(bgcolor="grey19"), Style(bgcolor="black")]
-    )
+    table = Table(box=box.HORIZONTALS, row_styles=[Style(bgcolor="grey19"), Style(bgcolor="black")])
     table.add_column("ID", justify="right", no_wrap=True)
     table.add_column("Title")
     table.add_column("Feed", justify="left", no_wrap=True)
     table.add_column("Date", justify="right", no_wrap=True)
 
-    for result in formated_results:
-        table.add_row(str(result["id"]), result["title"], result["feed"]["title"], result["published_at"], )
+    for entry in entries:
+        title = entry["title"]
 
+        if entry["status"] in ("read", "removed", ):
+            continue
+
+        is_match, matches_and, matches_or, _ = \
+            and_or_not_match(title, keywords_and, keywords_or, keywords_not)
+
+        if not is_match:
+            continue
+
+        # log.debug("Matches: {AND: %r, OR: %r, NOT: %r}", matches_and, matches_or, matches_not)
+        results.append(entry)
+
+        # Decorate table
+        matches_and_start = []
+        matches_and_end = []
+        matches_or_start = []
+        matches_or_end = []
+
+        for match in [match for match in matches_and if match]:
+            matches_and_start.append(match.start())
+            matches_and_end.append(match.end())
+        for match in [match for match in matches_or if match]:
+            matches_or_start.append(match.start())
+            matches_or_end.append(match.end())
+        formated_title = ""
+        for idx, char in enumerate(title):
+            match idx:
+                case idx if idx in matches_and_start:
+                    formated_title += "[keyword_and]"
+                case idx if idx in matches_and_end:
+                    formated_title += "[/keyword_and]"
+                case idx if idx in matches_or_start:
+                    formated_title += "[keyword_or]"
+                case idx if idx in matches_or_end:
+                    formated_title += "[/keyword_or]"
+                case _:
+                    pass
+            formated_title += char
+
+        title = f"[link={entry['url']}]{formated_title}[/link]"
+        enrty_id = str(entry["id"])
+        feed = f"[link={entry['feed']['feed_url']}]{entry['feed']['title']}[/link]"
+        published_at = color_datetime(datetime.fromisoformat(entry["published_at"]), "humanize")
+
+        table.add_row(enrty_id, title, feed, published_at)
+
+    if len(results) <= 0:
+        print("[b green]No result found.[/b green]")
+        return 0
+
+    # end for entry in entries
+    table.title = f"Find {len(results)} result(s)."
     print(table)
-
     click.confirm("Mark all as read?", default=False, abort=True)
+
+    user_dict = SimpleSetInFile(USER_DICT_PATH)
 
     ids = []
     for result in results:
         ids.append(result["id"])
 
     if dryrun:
-        print(f"Dryrun: mark {len(ids)} entries {ids} as read.")
+        print(f"[red]Dryrun[/red]: mark {len(ids)} entries {ids} as read.")
     else:
-        cache = SimpleCache(cache_path, cache_life)
+        cache = SimpleCache(CACHE_PATH, CACHE_LIFE)
         for result in results:
             result["status"] = "read"
         cache.write(entries)
         log.info("Mark as entry %d as read in the cache.", result["id"])
 
-        if user_dict_path:
-            add_to_user_dict(keyword, user_dict_path)
-        print(f"Marking {len(ids)} entries {ids} as read.")
+        keywords = keywords_and + keywords_or
+        for keyword in keywords:
+            user_dict.append(keyword)
+        log.info("Add %r keywords into the user dict.", keywords)
 
+        print(f"Marking {len(ids)} entries {ids} as read.")
         client.update_entries(entry_ids=ids, status="read")
     print("Done.")
 
