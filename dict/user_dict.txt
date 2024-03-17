@@ -12,7 +12,6 @@ VIVO
 Visa
 Ubisoft
 Twitter
-twitter
 TikTok
 Threads
 TGA
@@ -700,3 +699,11 @@ Acer
 3DMark
 2077
 「X」
+日圓
+Gemini
+Copilot
+GPT4
+GPT3
+GPT
+Nikon
+3DMark

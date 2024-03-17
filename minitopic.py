@@ -3,7 +3,6 @@
 import re
 import logging
 from typing import Any
-from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 import miniflux
@@ -17,8 +16,9 @@ from rich.logging import RichHandler
 from rich.console import Console
 from rich import box
 
-from simple_cache import SimpleCache
 from config import BASE_URL, API_KEY, CACHE_PATH, CACHE_LIFE, USER_DICT_PATH
+from utils.simple_cache import SimpleCache
+from utils.wordset import SimpleSetInFile
 
 theme = Theme({
     "keyword_and": "bold red",
@@ -33,7 +33,8 @@ log.setLevel(logging.DEBUG)
 
 
 def and_or_not_match(
-    string: str, patterns_and: list[str] = None, patterns_or: list[str] = None, patterns_not: list[str] = None
+    string: str,
+    patterns_and: list[str] | None = None, patterns_or: list[str] | None = None, patterns_not: list[str] | None = None
 ) -> tuple[bool, list[re.Match | None], list[re.Match | None], list[re.Match | None]]:
     """
     Perform a search on the input string using a combination of AND, OR, and NOT patterns.
@@ -164,55 +165,6 @@ def fetch_entries(client: miniflux.Client, status: str = "unread", fetch_batch_s
     return entries
 
 
-class SimpleSetInFile:
-    """A simple set implementation using a text file as storage."""
-    path: Path
-    lines: list[str]
-
-    def __init__(self, path: Path) -> None:
-        """
-        Initializes the SimpleSetInFile object with the given file path.
-        Reads the contents of the file and populates the set.
-
-        Parameters:
-            path (Path): The file path where the set is stored.
-        """
-        self.path = path
-        self.read()
-
-    def read(self, encoding="UTF-8") -> None:
-        """
-        Reads the contents of the file and updates the set.
-
-        Parameters:
-            encoding (str, optional): The encoding of the file. Defaults to "UTF-8".
-        """
-        text = self.path.read_text(encoding=encoding).strip()
-        self.lines = [line.strip() for line in text.splitlines()]
-
-    def append(self, line) -> None:
-        """
-        Appends a new element to the set if it is not already present.
-        Writes the updated set to the file.
-
-        Parameters:
-            line: The element to be appended to the set.
-        """
-        if line in self.lines:
-            return
-        self.lines.append(line)
-        self.write()
-
-    def write(self, encoding="UTF-8") -> None:
-        """
-        Writes the current set elements to the file.
-
-        Parameters:
-            encoding (str, optional): The encoding of the file. Defaults to "UTF-8".
-        """
-        self.path.write_text("\n".join(self.lines), encoding=encoding)
-
-
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.argument("keywords", nargs=-1)
 @click.option("-a", "--and", "keywords_and", multiple=True, metavar="AND_KEYWORDS",
@@ -341,10 +293,9 @@ def cli(keywords: str, keywords_and: list[str], keywords_or: list[str], keywords
         cache.write(entries)
         log.info("Mark as entry %d as read in the cache.", result["id"])
 
-        keywords = keywords_and + keywords_or
-        for keyword in keywords:
-            user_dict.append(keyword)
-        log.info("Add %r keywords into the user dict.", keywords)
+        words: list[str] = keywords_and + keywords_or
+        for word in words:
+            user_dict.append(word)
 
         print(f"Marking {len(ids)} entries {ids} as read.")
         client.update_entries(entry_ids=ids, status="read")
